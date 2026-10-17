@@ -1,0 +1,225 @@
+import streamlit as st
+import google.generativeai as genai
+from PIL import Image
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import json
+import io
+import fitz  # PyMuPDF for PDF to Image conversion
+
+st.set_page_config(page_title="Lineman Register to Excel Converter", layout="wide")
+st.title("⚡ Lineman Register (Photo & PDF) to Structured Excel Converter")
+st.write("Register ki Photos (JPG/PNG) ya PDF upload karein aur Transformer-wise Excel file paayein.")
+
+api_key = st.sidebar.text_input("Enter Gemini API Key:", type="password")
+if api_key:
+    genai.configure(api_key=api_key)
+
+uploaded_files = st.file_uploader(
+    "Register ke Pages (Images ya PDF) Upload Karen", 
+    type=["jpg", "png", "jpeg", "pdf"], 
+    accept_multiple_files=True
+)
+
+def parse_image_with_ai(image_bytes):
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = """
+    Aapko ek handwritten lineman electricity register ka page diya gaya hai.
+    Is page se data extract karke strictly NEECHE DIYE GAYE JSON FORMAT mein reply karein.
+    
+    Expected JSON Structure:
+    {
+      "groups": [
+        {
+          "transformer_name": "Transformer Ka Naam",
+          "capacity": "Capacity (e.g., 25 KVA / 63 KVA)",
+          "page": "Page No.",
+          "rows": [
+            {
+              "s_no": 1,
+              "connection_no": "IVRS/Connection No. ya -",
+              "consumer_name": "Name of Consumer",
+              "father_husband_name": "Father or Husband Name ya -",
+              "outstanding_amount": 0,
+              "remarks": "HP/TC/CD/Remarks ya -"
+            }
+          ]
+        }
+      ]
+    }
+    Note: Outstanding amount 0 rakhein agar na ho. Direct valid JSON output dein.
+    """
+    image = Image.open(io.BytesIO(image_bytes))
+    response = model.generate_content([image, prompt])
+    text_resp = response.text.strip()
+    if text_resp.startswith("```json"):
+        text_resp = text_resp[7:]
+    if text_resp.endswith("```"):
+        text_resp = text_resp[:-3]
+    return json.loads(text_resp.strip())
+
+def generate_styled_excel(all_groups):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Outstanding Register"
+    ws.views.sheetView[0].showGridLines = True
+
+    ws.merge_cells('A1:F1')
+    title = ws['A1']
+    title.value = "विद्युत ट्रांसफार्मर वार उपभोक्ता व बकाया राशि रजिस्टर"
+    title.font = Font(name='Calibri', size=15, bold=True, color='FFFFFF')
+    title.fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    title.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 34
+
+    section_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+    section_font = Font(name='Calibri', size=12, bold=True, color='1F4E79')
+    header_fill = PatternFill(start_color='2F5597', end_color='2F5597', fill_type='solid')
+    header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+    header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    total_fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+    total_font = Font(name='Calibri', size=11, bold=True, color='800000')
+
+    border_side = Side(style='thin', color='D9D9D9')
+    thin_border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
+    total_top_border = Side(style='thin', color='000000')
+    total_bottom_border = Side(style='double', color='000000')
+    total_border = Border(left=border_side, right=border_side, top=total_top_border, bottom=total_bottom_border)
+
+    fill_even = PatternFill(start_color='F9FAFB', end_color='F9FAFB', fill_type='solid')
+    fill_odd = PatternFill(start_color='FFFFFF', end_color='FFFFFF', fill_type='solid')
+
+    headers = [
+        "क्र.सं. (S.No.)", "कनेक्शन नंबर (IVRS / Service No.)", 
+        "उपभोक्ता का नाम (Consumer Name)", "पिता / पति का नाम (Father / Husband)", 
+        "बकाया राशि (Outstanding Amount ₹)", "विवरण / टिप्पणी (HP / Remarks)"
+    ]
+
+    current_row = 3
+    subtotal_rows = []
+
+    for g in all_groups:
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=6)
+        sec_cell = ws.cell(row=current_row, column=1)
+        sec_cell.value = f"ट्रांसफार्मर: {g.get('transformer_name', '-')}  |  क्षमता: {g.get('capacity', '-')}  |  रजिस्टर पेज: {g.get('page', '-')}"
+        sec_cell.font = section_font
+        sec_cell.fill = section_fill
+        sec_cell.alignment = Alignment(horizontal='left', vertical='center')
+        ws.row_dimensions[current_row].height = 25
+        current_row += 1
+
+        ws.row_dimensions[current_row].height = 24
+        for c_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=current_row, column=c_idx, value=h)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+        current_row += 1
+
+        start_data_row = current_row
+
+        for r_idx, r in enumerate(g.get('rows', [])):
+            ws.row_dimensions[current_row].height = 20
+            row_fill = fill_even if r_idx % 2 == 0 else fill_odd
+            row_values = [
+                r.get('s_no', r_idx+1), r.get('connection_no', '-'),
+                r.get('consumer_name', '-'), r.get('father_husband_name', '-'),
+                float(r.get('outstanding_amount', 0)), r.get('remarks', '-')
+            ]
+            for c_idx, val in enumerate(row_values, 1):
+                cell = ws.cell(row=current_row, column=c_idx, value=val)
+                cell.fill = row_fill
+                cell.font = Font(name='Calibri', size=11)
+                cell.border = thin_border
+                if c_idx in [1, 2]:
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                elif c_idx == 5:
+                    cell.alignment = Alignment(horizontal='right', vertical='center')
+                    cell.number_format = '₹#,##0.00'
+                else:
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
+            current_row += 1
+
+        end_data_row = current_row - 1
+
+        ws.row_dimensions[current_row].height = 22
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
+        sub_label = ws.cell(row=current_row, column=1, value=f"कुल बकाया ({g.get('transformer_name', '')}):")
+        sub_label.font = total_font
+        sub_label.fill = total_fill
+        sub_label.alignment = Alignment(horizontal='right', vertical='center')
+
+        sub_cell = ws.cell(row=current_row, column=5, value=f"=SUM(E{start_data_row}:E{end_data_row})")
+        sub_cell.font = total_font
+        sub_cell.fill = total_fill
+        sub_cell.alignment = Alignment(horizontal='right', vertical='center')
+        sub_cell.number_format = '₹#,##0.00'
+
+        ws.cell(row=current_row, column=6, value="").fill = total_fill
+        for c in range(1, 7):
+            ws.cell(row=current_row, column=c).border = total_border
+
+        subtotal_rows.append(current_row)
+        current_row += 1
+        ws.row_dimensions[current_row].height = 12
+        current_row += 1
+
+    ws.row_dimensions[current_row].height = 26
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
+    g_label = ws.cell(row=current_row, column=1, value="महायोग (GRAND TOTAL OUTSTANDING):")
+    g_label.font = Font(name='Calibri', size=12, bold=True, color='FFFFFF')
+    g_label.fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    g_label.alignment = Alignment(horizontal='right', vertical='center')
+
+    subtotal_str = ",".join([f"E{r}" for r in subtotal_rows])
+    g_cell = ws.cell(row=current_row, column=5, value=f"=SUM({subtotal_str})")
+    g_cell.font = Font(name='Calibri', size=12, bold=True, color='FFFFFF')
+    g_cell.fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    g_cell.alignment = Alignment(horizontal='right', vertical='center')
+    g_cell.number_format = '₹#,##0.00'
+    ws.cell(row=current_row, column=6, value="").fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+
+    ws.column_dimensions['A'].width = 16
+    ws.column_dimensions['B'].width = 28
+    ws.column_dimensions['C'].width = 28
+    ws.column_dimensions['D'].width = 28
+    ws.column_dimensions['E'].width = 25
+    ws.column_dimensions['F'].width = 24
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+if uploaded_files and api_key:
+    if st.button("Convert Uploaded Files to Excel 🚀"):
+        all_groups = []
+        with st.spinner("Processing Files with AI OCR..."):
+            for file in uploaded_files:
+                file_bytes = file.read()
+                file_extension = file.name.split('.')[-1].lower()
+                if file_extension in ['jpg', 'jpeg', 'png']:
+                    parsed_json = parse_image_with_ai(file_bytes)
+                    if "groups" in parsed_json:
+                        all_groups.extend(parsed_json["groups"])
+                elif file_extension == 'pdf':
+                    pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+                    for page_num in range(len(pdf_document)):
+                        page = pdf_document.load_page(page_num)
+                        pix = page.get_pixmap(dpi=150)
+                        img_bytes = pix.tobytes("jpeg")
+                        parsed_json = parse_image_with_ai(img_bytes)
+                        if "groups" in parsed_json:
+                            all_groups.extend(parsed_json["groups"])
+        if all_groups:
+            excel_bytes = generate_styled_excel(all_groups)
+            st.success("Excel File Successfully Generated!")
+            st.download_button(
+                label="📥 Download Structured Excel File",
+                data=excel_bytes,
+                file_name="Converted_Lineman_Register.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+elif not api_key:
+    st.info("Kripya Sidebar mein Gemini API Key enter karen."
